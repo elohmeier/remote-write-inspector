@@ -1,5 +1,6 @@
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY remote-write-inspector /usr/local/bin/remote-write-inspector
+ARG TARGETARCH
+COPY linux/${TARGETARCH}/remote-write-inspector /usr/local/bin/remote-write-inspector
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/remote-write-inspector"]
