@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,6 +15,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/elohmeier/remote-write-inspector/internal/inspector"
+)
+
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 type identityFlags []string
@@ -30,6 +37,7 @@ func (f *identityFlags) Set(value string) error {
 func main() {
 	var identities identityFlags
 	var cfg inspector.Config
+	var showVersion bool
 
 	flag.StringVar(&cfg.ListenAddress, "listen-address", ":8080", "HTTP listen address.")
 	flag.Int64Var(&cfg.MaxBodyBytes, "max-body-bytes", 32<<20, "Maximum compressed request body size.")
@@ -47,7 +55,13 @@ func main() {
 	flag.BoolVar(&cfg.DisableDuplicateSampleDetection, "disable-duplicate-sample-detection", false, "Disable duplicate timestamp with different value detection.")
 	flag.BoolVar(&cfg.DisableCrossPathCollisionDetection, "disable-cross-path-collision-detection", false, "Disable cross-input-path canonical labelset collision detection.")
 	flag.Var(&identities, "identity", "Enable an identity shorthand. Repeatable. Supported: tenant, pipeline_sink, input_path, writer_id.")
+	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("remote-write-inspector %s (%s, %s)\n", version, commit, date)
+		return
+	}
 
 	cfg.IdentityNames = identities
 	cfg.DiagnosticMetricPrefixes = []string{"remote_write_inspector_", "obspipeline_"}

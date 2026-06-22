@@ -1,5 +1,12 @@
 # remote-write-inspector
 
+[![CI](https://github.com/elohmeier/remote-write-inspector/actions/workflows/ci.yml/badge.svg)](https://github.com/elohmeier/remote-write-inspector/actions/workflows/ci.yml)
+[![Release](https://github.com/elohmeier/remote-write-inspector/actions/workflows/release.yml/badge.svg)](https://github.com/elohmeier/remote-write-inspector/actions/workflows/release.yml)
+[![GitHub release](https://img.shields.io/github/v/release/elohmeier/remote-write-inspector?sort=semver)](https://github.com/elohmeier/remote-write-inspector/releases)
+[![Go Reference](https://pkg.go.dev/badge/github.com/elohmeier/remote-write-inspector.svg)](https://pkg.go.dev/github.com/elohmeier/remote-write-inspector)
+[![Go Report Card](https://goreportcard.com/badge/github.com/elohmeier/remote-write-inspector)](https://goreportcard.com/report/github.com/elohmeier/remote-write-inspector)
+[![GHCR](https://img.shields.io/badge/ghcr.io-elohmeier%2Fremote--write--inspector-blue)](https://github.com/elohmeier/remote-write-inspector/pkgs/container/remote-write-inspector)
+
 `remote-write-inspector` is a diagnostic Prometheus remote-write receiver for
 data-quality troubleshooting. It accepts Thanos-compatible remote-write traffic,
 exports bounded diagnostics, emits sampled structured logs, and returns `204 No
@@ -10,6 +17,12 @@ data into ingestion backpressure.
 
 ```bash
 go run ./cmd/remote-write-inspector --listen-address=:8080
+```
+
+Or run the GHCR image:
+
+```bash
+docker run --rm -p 8080:8080 ghcr.io/elohmeier/remote-write-inspector:main
 ```
 
 Enable identity labels explicitly when needed:

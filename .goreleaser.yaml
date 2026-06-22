@@ -1,0 +1,122 @@
+version: 2
+
+project_name: remote-write-inspector
+
+metadata:
+  mod_timestamp: "{{ .CommitTimestamp }}"
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: remote-write-inspector
+    main: ./cmd/remote-write-inspector
+    binary: remote-write-inspector
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
+
+  - id: rwi-loadgen
+    main: ./cmd/rwi-loadgen
+    binary: rwi-loadgen
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .Commit }} -X main.date={{ .Date }}
+
+archives:
+  - id: binaries
+    ids:
+      - remote-write-inspector
+      - rwi-loadgen
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+dockers:
+  - id: remote-write-inspector-amd64
+    ids:
+      - remote-write-inspector
+    goos: linux
+    goarch: amd64
+    use: buildx
+    dockerfile: Dockerfile.goreleaser
+    image_templates:
+      - ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}-amd64
+      - ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}-amd64
+      - ghcr.io/elohmeier/remote-write-inspector:latest-amd64
+    build_flag_templates:
+      - --platform=linux/amd64
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.description=Diagnostic Prometheus remote-write receiver for data-quality troubleshooting.
+      - --label=org.opencontainers.image.url=https://github.com/elohmeier/remote-write-inspector
+      - --label=org.opencontainers.image.source=https://github.com/elohmeier/remote-write-inspector
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+      - --label=org.opencontainers.image.created={{ .Date }}
+
+  - id: remote-write-inspector-arm64
+    ids:
+      - remote-write-inspector
+    goos: linux
+    goarch: arm64
+    use: buildx
+    dockerfile: Dockerfile.goreleaser
+    image_templates:
+      - ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}-arm64
+      - ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}-arm64
+      - ghcr.io/elohmeier/remote-write-inspector:latest-arm64
+    build_flag_templates:
+      - --platform=linux/arm64
+      - --label=org.opencontainers.image.title={{ .ProjectName }}
+      - --label=org.opencontainers.image.description=Diagnostic Prometheus remote-write receiver for data-quality troubleshooting.
+      - --label=org.opencontainers.image.url=https://github.com/elohmeier/remote-write-inspector
+      - --label=org.opencontainers.image.source=https://github.com/elohmeier/remote-write-inspector
+      - --label=org.opencontainers.image.version={{ .Version }}
+      - --label=org.opencontainers.image.revision={{ .FullCommit }}
+      - --label=org.opencontainers.image.created={{ .Date }}
+
+docker_manifests:
+  - name_template: ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}
+    image_templates:
+      - ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}-amd64
+      - ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}-arm64
+
+  - name_template: ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}
+    image_templates:
+      - ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}-amd64
+      - ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}-arm64
+
+  - name_template: ghcr.io/elohmeier/remote-write-inspector:latest
+    image_templates:
+      - ghcr.io/elohmeier/remote-write-inspector:latest-amd64
+      - ghcr.io/elohmeier/remote-write-inspector:latest-arm64
+
+changelog:
+  disable: true
+
+release:
+  mode: append

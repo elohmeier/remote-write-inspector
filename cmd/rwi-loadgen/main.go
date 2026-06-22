@@ -28,6 +28,12 @@ import (
 
 const remoteWriteVersion = "0.1.0"
 
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+)
+
 type config struct {
 	targetURL          string
 	duration           time.Duration
@@ -46,6 +52,7 @@ type config struct {
 	invalidSeriesRatio float64
 	conflictRatio      float64
 	progressInterval   time.Duration
+	showVersion        bool
 }
 
 type generatedRequest struct {
@@ -95,6 +102,10 @@ type latencyHistogram struct {
 
 func main() {
 	cfg := parseFlags()
+	if cfg.showVersion {
+		fmt.Printf("rwi-loadgen %s (%s, %s)\n", version, commit, date)
+		return
+	}
 	if err := cfg.validate(); err != nil {
 		fmt.Fprintf(os.Stderr, "invalid configuration: %v\n", err)
 		os.Exit(2)
@@ -178,6 +189,7 @@ func parseFlags() config {
 	flagSet.Float64Var(&cfg.invalidSeriesRatio, "invalid-series-ratio", cfg.invalidSeriesRatio, "Fraction of series generated with an invalid metric name.")
 	flagSet.Float64Var(&cfg.conflictRatio, "conflict-ratio", cfg.conflictRatio, "Fraction of samples generated with repeated timestamps and changing values.")
 	flagSet.DurationVar(&cfg.progressInterval, "progress-interval", cfg.progressInterval, "Progress print interval. Set to 0 to disable.")
+	flagSet.BoolVar(&cfg.showVersion, "version", cfg.showVersion, "Print version information and exit.")
 	_ = flagSet.Parse(os.Args[1:])
 
 	return cfg
