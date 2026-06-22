@@ -39,10 +39,13 @@ func main() {
 	flag.IntVar(&cfg.MaxLabelValueLength, "max-label-value-length", 4096, "Maximum accepted label value length before reporting excessive_label_value_length.")
 	flag.IntVar(&cfg.MaxIdentityLength, "max-identity-length", 128, "Maximum identity value length used in metric labels.")
 	flag.IntVar(&cfg.CacheSize, "cache-size", 500000, "Maximum entries per stateful detector cache.")
+	flag.Int64Var(&cfg.CacheMemoryBytes, "cache-memory-bytes", 0, "Approximate memory budget in bytes for stateful detector caches. Overrides cache-size when set.")
 	flag.DurationVar(&cfg.CacheTTL, "cache-ttl", 25*time.Hour, "TTL for stateful detector cache entries.")
 	flag.IntVar(&cfg.TopSeriesSize, "top-series-size", 20, "Maximum top series exposed by the top-series collector.")
 	flag.DurationVar(&cfg.TopSeriesWindow, "top-series-window", 5*time.Minute, "Window duration for top-series diagnostics.")
 	flag.Float64Var(&cfg.LogSampleRate, "log-sample-rate", 0.01, "Probability for logging a detected bad series or sample example.")
+	flag.BoolVar(&cfg.DisableDuplicateSampleDetection, "disable-duplicate-sample-detection", false, "Disable duplicate timestamp with different value detection.")
+	flag.BoolVar(&cfg.DisableCrossPathCollisionDetection, "disable-cross-path-collision-detection", false, "Disable cross-input-path canonical labelset collision detection.")
 	flag.Var(&identities, "identity", "Enable an identity shorthand. Repeatable. Supported: tenant, pipeline_sink, input_path, writer_id.")
 	flag.Parse()
 

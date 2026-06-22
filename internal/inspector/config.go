@@ -15,11 +15,15 @@ type Config struct {
 	MaxLabels                int
 	MaxLabelValueLength      int
 	CacheSize                int
+	CacheMemoryBytes         int64
 	CacheTTL                 time.Duration
 	TopSeriesSize            int
 	TopSeriesWindow          time.Duration
 	LogSampleRate            float64
 	DiagnosticMetricPrefixes []string
+
+	DisableDuplicateSampleDetection    bool
+	DisableCrossPathCollisionDetection bool
 }
 
 func (c *Config) normalize() error {
@@ -44,7 +48,9 @@ func (c *Config) normalize() error {
 	if c.MaxLabelValueLength <= 0 {
 		c.MaxLabelValueLength = 4096
 	}
-	if c.CacheSize <= 0 {
+	if c.CacheMemoryBytes > 0 {
+		c.CacheSize = cacheSizeFromMemoryBudget(c.CacheMemoryBytes)
+	} else if c.CacheSize <= 0 {
 		c.CacheSize = 500000
 	}
 	if c.CacheTTL <= 0 {
@@ -63,4 +69,20 @@ func (c *Config) normalize() error {
 		c.DiagnosticMetricPrefixes = []string{"remote_write_inspector_", "obspipeline_"}
 	}
 	return nil
+}
+
+func cacheSizeFromMemoryBudget(bytes int64) int {
+	const (
+		statefulCaches         = 2
+		estimatedBytesPerEntry = 160
+	)
+	entries := bytes / (statefulCaches * estimatedBytesPerEntry)
+	if entries < 1 {
+		return 1
+	}
+	maxInt := int64(^uint(0) >> 1)
+	if entries > maxInt {
+		return int(maxInt)
+	}
+	return int(entries)
 }

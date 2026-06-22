@@ -37,14 +37,16 @@ var (
 )
 
 type Inspector struct {
-	cfg      Config
-	ids      *IdentitySet
-	metrics  *metrics
-	logger   *slog.Logger
-	clock    func() time.Time
-	cacheMtx sync.Mutex
-	samples  *lruCache[sampleKey, sampleValue]
-	paths    *lruCache[pathKey, string]
+	cfg     Config
+	ids     *IdentitySet
+	metrics *metrics
+	logger  *slog.Logger
+	clock   func() time.Time
+	samples *stateCache[sampleKey, sampleValue]
+	paths   *stateCache[pathKey, string]
+
+	cacheMetricsMtx  sync.Mutex
+	cacheMetricsLast time.Time
 }
 
 type InspectionResult struct {
@@ -86,14 +88,22 @@ func New(cfg Config, reg prometheus.Registerer, logger *slog.Logger) (*Inspector
 	if err != nil {
 		return nil, err
 	}
+	sampleCacheSize := cfg.CacheSize
+	if cfg.DisableDuplicateSampleDetection {
+		sampleCacheSize = 1
+	}
+	pathCacheSize := cfg.CacheSize
+	if cfg.DisableCrossPathCollisionDetection {
+		pathCacheSize = 1
+	}
 	return &Inspector{
 		cfg:     cfg,
 		ids:     ids,
 		metrics: m,
 		logger:  logger.With("component", "remote-write-inspector"),
 		clock:   clock,
-		samples: newLRUCache[sampleKey, sampleValue](cfg.CacheSize, cfg.CacheTTL, clock),
-		paths:   newLRUCache[pathKey, string](cfg.CacheSize, cfg.CacheTTL, clock),
+		samples: newStateCache[sampleKey, sampleValue](sampleCacheSize, cfg.CacheTTL, clock, sampleCacheShard),
+		paths:   newStateCache[pathKey, string](pathCacheSize, cfg.CacheTTL, clock, pathCacheShard),
 	}, nil
 }
 
@@ -134,7 +144,7 @@ func (i *Inspector) Inspect(identity RequestIdentity, req *prompb.WriteRequest) 
 		}
 
 		if len(seriesReasons) == 0 {
-			if i.detectCrossPathCollision(identity, series.hash) {
+			if !i.cfg.DisableCrossPathCollisionDetection && i.detectCrossPathCollision(identity, series.hash) {
 				result.BadData = true
 				i.observeBadSeries(identity, reasonCrossPathCollision, ts.Labels, series)
 			}
@@ -156,7 +166,7 @@ func (i *Inspector) Inspect(identity RequestIdentity, req *prompb.WriteRequest) 
 				result.BadData = true
 				i.observeBadSample(identity, reasonFutureSample, ts.Labels, series, sample.Timestamp, sample.Value)
 			}
-			if len(seriesReasons) == 0 && !badSample && i.detectDuplicateSample(identity, series.hash, sample.Timestamp, sample.Value) {
+			if len(seriesReasons) == 0 && !badSample && !i.cfg.DisableDuplicateSampleDetection && i.detectDuplicateSample(identity, series.hash, sample.Timestamp, sample.Value) {
 				result.BadData = true
 				i.observeBadSample(identity, reasonDuplicateTimestampDifferentValue, ts.Labels, series, sample.Timestamp, sample.Value)
 			}
@@ -185,56 +195,73 @@ type seriesDetails struct {
 }
 
 func (i *Inspector) validateSeries(labels []prompb.Label) map[string]struct{} {
-	reasons := map[string]struct{}{}
+	var reasons map[string]struct{}
+	addReason := func(reason string) {
+		if reasons == nil {
+			reasons = make(map[string]struct{}, 1)
+		}
+		reasons[reason] = struct{}{}
+	}
+
 	if len(labels) == 0 {
-		reasons[reasonMissingMetricName] = struct{}{}
+		addReason(reasonMissingMetricName)
 		return reasons
 	}
 	if len(labels) > i.cfg.MaxLabels {
-		reasons[reasonExcessiveLabelCount] = struct{}{}
+		addReason(reasonExcessiveLabelCount)
 	}
 
 	metricSeen := false
-	seen := make(map[string]struct{}, len(labels))
+	inNameOrder := true
 	prevName := ""
 	for idx, label := range labels {
 		if idx > 0 && label.Name < prevName {
-			reasons[reasonOutOfOrderLabels] = struct{}{}
+			addReason(reasonOutOfOrderLabels)
+			inNameOrder = false
+		}
+		if idx > 0 && label.Name == prevName {
+			addReason(reasonDuplicateLabelName)
 		}
 		prevName = label.Name
 
 		if label.Name == "" {
-			reasons[reasonEmptyLabelName] = struct{}{}
+			addReason(reasonEmptyLabelName)
 			continue
 		}
-		if _, ok := seen[label.Name]; ok {
-			reasons[reasonDuplicateLabelName] = struct{}{}
-		}
-		seen[label.Name] = struct{}{}
 
 		if !labelNameRE.MatchString(label.Name) {
-			reasons[reasonInvalidLabelName] = struct{}{}
+			addReason(reasonInvalidLabelName)
 		}
 		if len(label.Value) > i.cfg.MaxLabelValueLength {
-			reasons[reasonExcessiveLabelValueLength] = struct{}{}
+			addReason(reasonExcessiveLabelValueLength)
 		}
 
 		if label.Name == metricNameLabel {
 			metricSeen = true
 			if label.Value == "" {
-				reasons[reasonEmptyMetricName] = struct{}{}
+				addReason(reasonEmptyMetricName)
 			} else if !metricNameRE.MatchString(label.Value) {
-				reasons[reasonInvalidMetricName] = struct{}{}
+				addReason(reasonInvalidMetricName)
 			}
 			continue
 		}
 
 		if label.Value == "" {
-			reasons[reasonEmptyLabelValue] = struct{}{}
+			addReason(reasonEmptyLabelValue)
+		}
+	}
+	if !inNameOrder {
+		seen := make(map[string]struct{}, len(labels))
+		for _, label := range labels {
+			if _, ok := seen[label.Name]; ok {
+				addReason(reasonDuplicateLabelName)
+				break
+			}
+			seen[label.Name] = struct{}{}
 		}
 	}
 	if !metricSeen {
-		reasons[reasonMissingMetricName] = struct{}{}
+		addReason(reasonMissingMetricName)
 	}
 	return reasons
 }
@@ -250,16 +277,14 @@ func (i *Inspector) isFuture(ts, nowMs int64) bool {
 func (i *Inspector) detectDuplicateSample(identity RequestIdentity, series uint64, ts int64, value float64) bool {
 	key := sampleKey{tenant: identity.Get("tenant"), series: series, ts: ts}
 	valueBits := math.Float64bits(value)
-	i.cacheMtx.Lock()
-	defer i.cacheMtx.Unlock()
 
-	if existing, ok := i.samples.Get(key); ok {
+	existing, ok, evicted := i.samples.GetOrPut(key, sampleValue{valueBits: valueBits})
+	if ok {
 		if existing.valueBits != valueBits {
 			return true
 		}
 		return false
 	}
-	evicted := i.samples.Put(key, sampleValue{valueBits: valueBits})
 	if evicted > 0 {
 		i.metrics.cacheEvictions.WithLabelValues("sample_conflicts").Add(float64(evicted))
 	}
@@ -272,13 +297,11 @@ func (i *Inspector) detectCrossPathCollision(identity RequestIdentity, series ui
 		return false
 	}
 	key := pathKey{tenant: identity.Get("tenant"), series: series}
-	i.cacheMtx.Lock()
-	defer i.cacheMtx.Unlock()
 
-	if existing, ok := i.paths.Get(key); ok {
+	existing, ok, evicted := i.paths.GetOrPut(key, inputPath)
+	if ok {
 		return existing != inputPath
 	}
-	evicted := i.paths.Put(key, inputPath)
 	if evicted > 0 {
 		i.metrics.cacheEvictions.WithLabelValues("cross_path").Add(float64(evicted))
 	}
@@ -326,8 +349,32 @@ func (i *Inspector) isDiagnosticMetric(name string) bool {
 }
 
 func (i *Inspector) updateCacheMetrics() {
-	i.cacheMtx.Lock()
-	defer i.cacheMtx.Unlock()
+	now := i.clock()
+	i.cacheMetricsMtx.Lock()
+	if !i.cacheMetricsLast.IsZero() && now.Sub(i.cacheMetricsLast) < time.Second {
+		i.cacheMetricsMtx.Unlock()
+		return
+	}
+	i.cacheMetricsLast = now
+	i.cacheMetricsMtx.Unlock()
+
 	i.metrics.cacheEntries.WithLabelValues("sample_conflicts").Set(float64(i.samples.Len()))
 	i.metrics.cacheEntries.WithLabelValues("cross_path").Set(float64(i.paths.Len()))
+}
+
+func sampleCacheShard(key sampleKey) uint64 {
+	return key.series ^ uint64(key.ts) ^ hashString64(key.tenant)
+}
+
+func pathCacheShard(key pathKey) uint64 {
+	return key.series ^ hashString64(key.tenant)
+}
+
+func hashString64(s string) uint64 {
+	h := uint64(14695981039346656037)
+	for idx := 0; idx < len(s); idx++ {
+		h ^= uint64(s[idx])
+		h *= 1099511628211
+	}
+	return h
 }

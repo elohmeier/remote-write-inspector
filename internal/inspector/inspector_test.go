@@ -112,6 +112,21 @@ remote_write_inspector_bad_samples_total{reason="duplicate_timestamp_different_v
 	}
 }
 
+func TestDuplicateTimestampDifferentValueCanBeDisabled(t *testing.T) {
+	ins := newTestInspector(t, Config{
+		IdentityNames:                   []string{"tenant"},
+		DisableDuplicateSampleDetection: true,
+	})
+	id := identityFor(ins, http.Header{"X-Scope-Orgid": []string{"tenant-a"}})
+	req := writeRequest(sampleSeries("temperature_celsius", "host-a", sample(time.Now().UnixMilli(), 1)))
+	ins.Inspect(id, req)
+
+	req.Timeseries[0].Samples[0].Value = 2
+	if result := ins.Inspect(id, req); result.BadData {
+		t.Fatalf("duplicate timestamp conflict was detected despite disabled detector")
+	}
+}
+
 func TestStaleFutureAndCrossPath(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	ins := newTestInspectorWithRegistry(t, reg, Config{IdentityNames: []string{"tenant", "input_path"}, StaleCutoff: time.Hour, FutureSkew: time.Minute})
@@ -151,6 +166,21 @@ remote_write_inspector_bad_samples_total{input_path="path-a",reason="stale_sampl
 remote_write_inspector_bad_series_total{input_path="path-b",reason="cross_path_collision",tenant="tenant-a"} 1
 `), "remote_write_inspector_bad_series_total"); err != nil {
 		t.Fatalf("bad series metric mismatch: %v", err)
+	}
+}
+
+func TestCrossPathCollisionCanBeDisabled(t *testing.T) {
+	ins := newTestInspector(t, Config{
+		IdentityNames:                      []string{"tenant", "input_path"},
+		DisableCrossPathCollisionDetection: true,
+	})
+	idA := identityFor(ins, http.Header{"X-Scope-Orgid": []string{"tenant-a"}, "X-Obs-Input-Path": []string{"path-a"}})
+	idB := identityFor(ins, http.Header{"X-Scope-Orgid": []string{"tenant-a"}, "X-Obs-Input-Path": []string{"path-b"}})
+	req := writeRequest(sampleSeries("requests_total", "host-a", sample(time.Now().UnixMilli(), 1)))
+
+	ins.Inspect(idA, req)
+	if result := ins.Inspect(idB, req); result.BadData {
+		t.Fatalf("cross-path collision was detected despite disabled detector")
 	}
 }
 

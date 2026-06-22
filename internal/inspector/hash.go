@@ -19,13 +19,43 @@ type labelPair struct {
 }
 
 func canonicalHash(labels []prompb.Label) uint64 {
+	if labelsInCanonicalOrder(labels) {
+		return hashLabels(labels)
+	}
 	pairs := sortedPairs(labels)
-	d := xxhash.New()
+	var d xxhash.Digest
+	d.Reset()
 	for _, pair := range pairs {
 		_, _ = d.WriteString(pair.name)
-		_, _ = d.Write([]byte{0})
+		_, _ = d.WriteString("\x00")
 		_, _ = d.WriteString(pair.value)
-		_, _ = d.Write([]byte{0})
+		_, _ = d.WriteString("\x00")
+	}
+	return d.Sum64()
+}
+
+func labelsInCanonicalOrder(labels []prompb.Label) bool {
+	for idx := 1; idx < len(labels); idx++ {
+		prev := labels[idx-1]
+		curr := labels[idx]
+		if curr.Name < prev.Name {
+			return false
+		}
+		if curr.Name == prev.Name && curr.Value < prev.Value {
+			return false
+		}
+	}
+	return true
+}
+
+func hashLabels(labels []prompb.Label) uint64 {
+	var d xxhash.Digest
+	d.Reset()
+	for _, label := range labels {
+		_, _ = d.WriteString(label.Name)
+		_, _ = d.WriteString("\x00")
+		_, _ = d.WriteString(label.Value)
+		_, _ = d.WriteString("\x00")
 	}
 	return d.Sum64()
 }
