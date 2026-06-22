@@ -56,64 +56,37 @@ checksum:
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
-dockers:
-  - id: remote-write-inspector-amd64
+dockers_v2:
+  - id: remote-write-inspector
     ids:
       - remote-write-inspector
-    goos: linux
-    goarch: amd64
-    use: buildx
     dockerfile: Dockerfile.goreleaser
-    image_templates:
-      - ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}-amd64
-      - ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}-amd64
-      - ghcr.io/elohmeier/remote-write-inspector:latest-amd64
-    build_flag_templates:
-      - --platform=linux/amd64
-      - --label=org.opencontainers.image.title={{ .ProjectName }}
-      - --label=org.opencontainers.image.description=Diagnostic Prometheus remote-write receiver for data-quality troubleshooting.
-      - --label=org.opencontainers.image.url=https://github.com/elohmeier/remote-write-inspector
-      - --label=org.opencontainers.image.source=https://github.com/elohmeier/remote-write-inspector
-      - --label=org.opencontainers.image.version={{ .Version }}
-      - --label=org.opencontainers.image.revision={{ .FullCommit }}
-      - --label=org.opencontainers.image.created={{ .Date }}
-
-  - id: remote-write-inspector-arm64
-    ids:
-      - remote-write-inspector
-    goos: linux
-    goarch: arm64
-    use: buildx
-    dockerfile: Dockerfile.goreleaser
-    image_templates:
-      - ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}-arm64
-      - ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}-arm64
-      - ghcr.io/elohmeier/remote-write-inspector:latest-arm64
-    build_flag_templates:
-      - --platform=linux/arm64
-      - --label=org.opencontainers.image.title={{ .ProjectName }}
-      - --label=org.opencontainers.image.description=Diagnostic Prometheus remote-write receiver for data-quality troubleshooting.
-      - --label=org.opencontainers.image.url=https://github.com/elohmeier/remote-write-inspector
-      - --label=org.opencontainers.image.source=https://github.com/elohmeier/remote-write-inspector
-      - --label=org.opencontainers.image.version={{ .Version }}
-      - --label=org.opencontainers.image.revision={{ .FullCommit }}
-      - --label=org.opencontainers.image.created={{ .Date }}
-
-docker_manifests:
-  - name_template: ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}
-    image_templates:
-      - ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}-amd64
-      - ghcr.io/elohmeier/remote-write-inspector:{{ .Tag }}-arm64
-
-  - name_template: ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}
-    image_templates:
-      - ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}-amd64
-      - ghcr.io/elohmeier/remote-write-inspector:{{ .Version }}-arm64
-
-  - name_template: ghcr.io/elohmeier/remote-write-inspector:latest
-    image_templates:
-      - ghcr.io/elohmeier/remote-write-inspector:latest-amd64
-      - ghcr.io/elohmeier/remote-write-inspector:latest-arm64
+    images:
+      - ghcr.io/elohmeier/remote-write-inspector
+    tags:
+      - "{{ .Tag }}"
+      - "{{ .Version }}"
+      - latest
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    sbom: false
+    labels:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: Diagnostic Prometheus remote-write receiver for data-quality troubleshooting.
+      org.opencontainers.image.url: https://github.com/elohmeier/remote-write-inspector
+      org.opencontainers.image.source: https://github.com/elohmeier/remote-write-inspector
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
+    annotations:
+      org.opencontainers.image.title: "{{ .ProjectName }}"
+      org.opencontainers.image.description: Diagnostic Prometheus remote-write receiver for data-quality troubleshooting.
+      org.opencontainers.image.url: https://github.com/elohmeier/remote-write-inspector
+      org.opencontainers.image.source: https://github.com/elohmeier/remote-write-inspector
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.created: "{{ .Date }}"
 
 changelog:
   disable: true
