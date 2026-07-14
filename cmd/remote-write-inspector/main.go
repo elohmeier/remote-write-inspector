@@ -34,8 +34,24 @@ func (f *identityFlags) Set(value string) error {
 	return nil
 }
 
+type topSeriesLabelFlags []inspector.TopSeriesLabel
+
+func (f *topSeriesLabelFlags) String() string {
+	return ""
+}
+
+func (f *topSeriesLabelFlags) Set(value string) error {
+	projection, err := inspector.ParseTopSeriesLabel(value)
+	if err != nil {
+		return err
+	}
+	*f = append(*f, projection)
+	return nil
+}
+
 func main() {
 	var identities identityFlags
+	var topSeriesLabels topSeriesLabelFlags
 	var cfg inspector.Config
 	var showVersion bool
 
@@ -51,7 +67,10 @@ func main() {
 	flag.DurationVar(&cfg.CacheTTL, "cache-ttl", 25*time.Hour, "TTL for stateful detector cache entries.")
 	flag.IntVar(&cfg.TopSeriesSize, "top-series-size", 20, "Maximum top series exposed by the top-series collector.")
 	flag.DurationVar(&cfg.TopSeriesWindow, "top-series-window", 5*time.Minute, "Window duration for top-series diagnostics.")
-	flag.Float64Var(&cfg.LogSampleRate, "log-sample-rate", 0.01, "Probability for logging a detected bad series or sample example.")
+	flag.Var(&topSeriesLabels, "top-series-label", "Promote a source-series label into top-series metrics and logs as source_name, or use source=output. Repeatable.")
+	flag.IntVar(&cfg.LogFirstExamplesPerWindow, "log-first-examples-per-window", 20, "Maximum distinct findings logged deterministically in each top-series window.")
+	flag.Float64Var(&cfg.LogSampleRate, "log-sample-rate", 0.01, "Probability for logging repeat findings after deterministic first examples.")
+	flag.IntVar(&cfg.LogLabelBytes, "log-label-bytes", 4096, "Maximum encoded bytes used for the ordered source-label array in each finding log.")
 	flag.BoolVar(&cfg.DisableDuplicateSampleDetection, "disable-duplicate-sample-detection", false, "Disable duplicate timestamp with different value detection.")
 	flag.BoolVar(&cfg.DisableCrossPathCollisionDetection, "disable-cross-path-collision-detection", false, "Disable cross-input-path canonical labelset collision detection.")
 	flag.Var(&identities, "identity", "Enable an identity shorthand. Repeatable. Supported: tenant, pipeline_sink, input_path, writer_id.")
@@ -64,6 +83,7 @@ func main() {
 	}
 
 	cfg.IdentityNames = identities
+	cfg.TopSeriesLabels = topSeriesLabels
 	cfg.DiagnosticMetricPrefixes = []string{"remote_write_inspector_", "obspipeline_"}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))

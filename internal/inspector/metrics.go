@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/prometheus/prompb"
 )
 
 type metrics struct {
@@ -22,7 +23,7 @@ type metrics struct {
 	topSeries          *topSeriesCollector
 }
 
-func newMetrics(reg prometheus.Registerer, identityLabels []string, topSeriesSize int, topSeriesWindow time.Duration, clock func() time.Time) (*metrics, error) {
+func newMetrics(reg prometheus.Registerer, identityLabels []string, topSeriesSize int, topSeriesWindow time.Duration, topSeriesLabels []TopSeriesLabel, clock func() time.Time) (*metrics, error) {
 	m := &metrics{
 		requests: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "remote_write_inspector_requests_total",
@@ -67,7 +68,7 @@ func newMetrics(reg prometheus.Registerer, identityLabels []string, topSeriesSiz
 			Help:    "Time spent validating decoded remote-write requests.",
 			Buckets: prometheus.DefBuckets,
 		}),
-		topSeries: newTopSeriesCollector(identityLabels, topSeriesSize, topSeriesWindow, clock),
+		topSeries: newTopSeriesCollector(identityLabels, topSeriesSize, topSeriesWindow, topSeriesLabels, clock),
 	}
 
 	collectors := []prometheus.Collector{
@@ -101,47 +102,50 @@ func appendLabels(labels []string, extra ...string) []string {
 type topSeriesKey struct {
 	identityValues string
 	reason         string
-	seriesName     string
-	hostName       string
+	seriesHash     uint64
 }
 
 type topSeriesEntry struct {
-	values     []string
-	reason     string
-	seriesName string
-	hostName   string
-	count      float64
+	key         topSeriesKey
+	values      []string
+	seriesName  string
+	fingerprint string
+	count       float64
 }
 
 type topSeriesCollector struct {
-	mtx            sync.Mutex
-	desc           *prometheus.Desc
-	identityLabels []string
-	maxSeries      int
-	window         time.Duration
-	clock          func() time.Time
-	windowStart    time.Time
-	entries        map[topSeriesKey]*topSeriesEntry
+	mtx         sync.Mutex
+	desc        *prometheus.Desc
+	projections []TopSeriesLabel
+	maxSeries   int
+	window      time.Duration
+	clock       func() time.Time
+	windowStart time.Time
+	entries     map[topSeriesKey]*topSeriesEntry
 }
 
-func newTopSeriesCollector(identityLabels []string, maxSeries int, window time.Duration, clock func() time.Time) *topSeriesCollector {
+func newTopSeriesCollector(identityLabels []string, maxSeries int, window time.Duration, projections []TopSeriesLabel, clock func() time.Time) *topSeriesCollector {
+	labelNames := appendLabels(identityLabels, "reason", "series_name", "host_name", "series_fingerprint")
+	for _, projection := range projections {
+		labelNames = append(labelNames, projection.Output)
+	}
 	return &topSeriesCollector{
 		desc: prometheus.NewDesc(
 			"remote_write_inspector_top_series",
-			"Top series observed with detected data quality problems in the current window.",
-			appendLabels(identityLabels, "reason", "series_name", "host_name"),
+			"Top exact canonical series observed with detected data quality problems in the current window.",
+			labelNames,
 			nil,
 		),
-		identityLabels: identityLabels,
-		maxSeries:      maxSeries,
-		window:         window,
-		clock:          clock,
-		windowStart:    clock(),
-		entries:        make(map[topSeriesKey]*topSeriesEntry),
+		projections: append([]TopSeriesLabel(nil), projections...),
+		maxSeries:   maxSeries,
+		window:      window,
+		clock:       clock,
+		windowStart: clock(),
+		entries:     make(map[topSeriesKey]*topSeriesEntry),
 	}
 }
 
-func (c *topSeriesCollector) Observe(identity RequestIdentity, reason, seriesName, hostName string) {
+func (c *topSeriesCollector) Observe(identity RequestIdentity, reason string, labels []prompb.Label, series seriesDetails) {
 	c.mtx.Lock()
 	defer c.mtx.Unlock()
 	c.resetExpiredLocked(c.clock())
@@ -149,16 +153,18 @@ func (c *topSeriesCollector) Observe(identity RequestIdentity, reason, seriesNam
 	key := topSeriesKey{
 		identityValues: joinIdentityValues(identity.values),
 		reason:         reason,
-		seriesName:     seriesName,
-		hostName:       hostName,
+		seriesHash:     series.hash,
 	}
 	entry, ok := c.entries[key]
 	if !ok {
+		fingerprint := seriesFingerprint(series.hash)
+		values := identity.LabelValues(reason, series.name, series.host, fingerprint)
+		values = append(values, projectedLabelValues(labels, c.projections)...)
 		entry = &topSeriesEntry{
-			values:     identity.LabelValues(reason, seriesName, hostName),
-			reason:     reason,
-			seriesName: seriesName,
-			hostName:   hostName,
+			key:         key,
+			values:      values,
+			seriesName:  series.name,
+			fingerprint: fingerprint,
 		}
 		c.entries[key] = entry
 	}
@@ -184,6 +190,9 @@ func (c *topSeriesCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].count == entries[j].count {
+			if entries[i].seriesName == entries[j].seriesName {
+				return entries[i].fingerprint < entries[j].fingerprint
+			}
 			return entries[i].seriesName < entries[j].seriesName
 		}
 		return entries[i].count > entries[j].count
@@ -221,15 +230,26 @@ func (c *topSeriesCollector) pruneLocked() {
 	}
 	next := make(map[topSeriesKey]*topSeriesEntry, keep)
 	for _, entry := range entries[:keep] {
-		key := topSeriesKey{
-			identityValues: joinIdentityValues(entry.values[:len(c.identityLabels)]),
-			reason:         entry.reason,
-			seriesName:     entry.seriesName,
-			hostName:       entry.hostName,
-		}
-		next[key] = entry
+		next[entry.key] = entry
 	}
 	c.entries = next
+}
+
+func projectedLabelValues(labels []prompb.Label, projections []TopSeriesLabel) []string {
+	values := make([]string, 0, len(projections))
+	for _, projection := range projections {
+		value := unknownIdentity
+		for _, label := range labels {
+			if label.Name == projection.Source {
+				if label.Value != "" {
+					value = label.Value
+				}
+				break
+			}
+		}
+		values = append(values, value)
+	}
+	return values
 }
 
 func joinIdentityValues(values []string) string {

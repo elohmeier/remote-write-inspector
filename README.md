@@ -74,6 +74,41 @@ details are limited to the bounded `remote_write_inspector_top_series` gauge;
 counters only use the configured identity labels plus fixed labels such as
 `reason` and `result`.
 
+`remote_write_inspector_top_series` represents exact canonical series. Each
+row contains a stable 16-character `series_fingerprint`, so series with the
+same metric and host are no longer merged. Selected source-series labels can
+be promoted into the bounded metric and its structured finding logs:
+
+```bash
+go run ./cmd/remote-write-inspector \
+  --identity=tenant \
+  --top-series-label=cluster \
+  --top-series-label=service_env \
+  --top-series-label=namespace \
+  --top-series-label=requestType=source_request_type
+```
+
+A bare source label is exported with a `source_` prefix. For example,
+`namespace` becomes `source_namespace`; this avoids collisions with labels
+added when the inspector itself is scraped. An explicit `source=output`
+mapping can normalize source label names. Missing source labels use `unknown`.
+Duplicate sources, output names, invalid Prometheus label names, and collisions
+with fixed or identity labels are rejected at startup.
+
+Finding logs include the fingerprint, the promoted fields, and an ordered,
+size-bounded `labels` array. The array preserves duplicate and out-of-order
+labels for invalid-series investigations. Duplicate-timestamp conflicts also
+include the previous and incoming IEEE-754 bit patterns, finite numeric values,
+and their delta.
+
+The first distinct findings in each `--top-series-window` are logged
+deterministically. `--log-first-examples-per-window` bounds those logs; after a
+finding's first example, `--log-sample-rate` controls repeat examples.
+`--log-label-bytes` bounds the encoded label array. Set both logging controls to
+zero to disable finding examples completely. Source labels and sample values
+are application-controlled and may be sensitive, so protect log access and
+retention accordingly.
+
 ## Load Testing
 
 The repo includes a synthetic remote-write load generator that sends real

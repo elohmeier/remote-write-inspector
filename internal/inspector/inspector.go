@@ -3,7 +3,6 @@ package inspector
 import (
 	"log/slog"
 	"math"
-	"math/rand"
 	"net/http"
 	"regexp"
 	"sync"
@@ -37,13 +36,14 @@ var (
 )
 
 type Inspector struct {
-	cfg     Config
-	ids     *IdentitySet
-	metrics *metrics
-	logger  *slog.Logger
-	clock   func() time.Time
-	samples *stateCache[sampleKey, sampleValue]
-	paths   *stateCache[pathKey, string]
+	cfg        Config
+	ids        *IdentitySet
+	metrics    *metrics
+	logger     *slog.Logger
+	clock      func() time.Time
+	logSampler *findingLogSampler
+	samples    *stateCache[sampleKey, sampleValue]
+	paths      *stateCache[pathKey, string]
 
 	cacheMetricsMtx  sync.Mutex
 	cacheMetricsLast time.Time
@@ -62,6 +62,22 @@ type sampleKey struct {
 
 type sampleValue struct {
 	valueBits uint64
+}
+
+type sampleConflict struct {
+	Found             bool
+	PreviousValueBits uint64
+	IncomingValueBits uint64
+}
+
+type sampleEvidence struct {
+	hasTimestamp      bool
+	timestampMs       int64
+	sampleType        string
+	hasPreviousValue  bool
+	previousValueBits uint64
+	hasIncomingValue  bool
+	incomingValueBits uint64
 }
 
 type pathKey struct {
@@ -84,7 +100,7 @@ func New(cfg Config, reg prometheus.Registerer, logger *slog.Logger) (*Inspector
 		logger = slog.Default()
 	}
 	clock := time.Now
-	m, err := newMetrics(reg, ids.LabelNames(), cfg.TopSeriesSize, cfg.TopSeriesWindow, clock)
+	m, err := newMetrics(reg, ids.LabelNames(), cfg.TopSeriesSize, cfg.TopSeriesWindow, cfg.TopSeriesLabels, clock)
 	if err != nil {
 		return nil, err
 	}
@@ -97,13 +113,14 @@ func New(cfg Config, reg prometheus.Registerer, logger *slog.Logger) (*Inspector
 		pathCacheSize = 1
 	}
 	return &Inspector{
-		cfg:     cfg,
-		ids:     ids,
-		metrics: m,
-		logger:  logger.With("component", "remote-write-inspector"),
-		clock:   clock,
-		samples: newStateCache[sampleKey, sampleValue](sampleCacheSize, cfg.CacheTTL, clock, sampleCacheShard),
-		paths:   newStateCache[pathKey, string](pathCacheSize, cfg.CacheTTL, clock, pathCacheShard),
+		cfg:        cfg,
+		ids:        ids,
+		metrics:    m,
+		logger:     logger.With("component", "remote-write-inspector"),
+		clock:      clock,
+		logSampler: newFindingLogSampler(cfg.TopSeriesWindow, cfg.LogFirstExamplesPerWindow, clock()),
+		samples:    newStateCache[sampleKey, sampleValue](sampleCacheSize, cfg.CacheTTL, clock, sampleCacheShard),
+		paths:      newStateCache[pathKey, string](pathCacheSize, cfg.CacheTTL, clock, pathCacheShard),
 	}, nil
 }
 
@@ -159,27 +176,30 @@ func (i *Inspector) Inspect(identity RequestIdentity, req *prompb.WriteRequest) 
 			if i.isStale(sample.Timestamp, nowMs) {
 				badSample = true
 				result.BadData = true
-				i.observeBadSample(identity, reasonStaleSample, ts.Labels, series, sample.Timestamp, sample.Value)
+				i.observeBadSample(identity, reasonStaleSample, ts.Labels, series, sampleValueEvidence(sample.Timestamp, sample.Value))
 			}
 			if i.isFuture(sample.Timestamp, nowMs) {
 				badSample = true
 				result.BadData = true
-				i.observeBadSample(identity, reasonFutureSample, ts.Labels, series, sample.Timestamp, sample.Value)
+				i.observeBadSample(identity, reasonFutureSample, ts.Labels, series, sampleValueEvidence(sample.Timestamp, sample.Value))
 			}
-			if len(seriesReasons) == 0 && !badSample && !i.cfg.DisableDuplicateSampleDetection && i.detectDuplicateSample(identity, series.hash, sample.Timestamp, sample.Value) {
-				result.BadData = true
-				i.observeBadSample(identity, reasonDuplicateTimestampDifferentValue, ts.Labels, series, sample.Timestamp, sample.Value)
+			if len(seriesReasons) == 0 && !badSample && !i.cfg.DisableDuplicateSampleDetection {
+				conflict := i.detectDuplicateSample(identity, series.hash, sample.Timestamp, sample.Value)
+				if conflict.Found {
+					result.BadData = true
+					i.observeBadSample(identity, reasonDuplicateTimestampDifferentValue, ts.Labels, series, sampleConflictEvidence(sample.Timestamp, conflict))
+				}
 			}
 		}
 
 		for _, histogram := range ts.Histograms {
 			if i.isStale(histogram.Timestamp, nowMs) {
 				result.BadData = true
-				i.observeBadSample(identity, reasonStaleSample, ts.Labels, series, histogram.Timestamp, 0)
+				i.observeBadSample(identity, reasonStaleSample, ts.Labels, series, histogramEvidence(histogram.Timestamp))
 			}
 			if i.isFuture(histogram.Timestamp, nowMs) {
 				result.BadData = true
-				i.observeBadSample(identity, reasonFutureSample, ts.Labels, series, histogram.Timestamp, 0)
+				i.observeBadSample(identity, reasonFutureSample, ts.Labels, series, histogramEvidence(histogram.Timestamp))
 			}
 		}
 	}
@@ -274,21 +294,21 @@ func (i *Inspector) isFuture(ts, nowMs int64) bool {
 	return ts > nowMs+i.cfg.FutureSkew.Milliseconds()
 }
 
-func (i *Inspector) detectDuplicateSample(identity RequestIdentity, series uint64, ts int64, value float64) bool {
+func (i *Inspector) detectDuplicateSample(identity RequestIdentity, series uint64, ts int64, value float64) sampleConflict {
 	key := sampleKey{tenant: identity.Get("tenant"), series: series, ts: ts}
 	valueBits := math.Float64bits(value)
 
 	existing, ok, evicted := i.samples.GetOrPut(key, sampleValue{valueBits: valueBits})
 	if ok {
 		if existing.valueBits != valueBits {
-			return true
+			return sampleConflict{Found: true, PreviousValueBits: existing.valueBits, IncomingValueBits: valueBits}
 		}
-		return false
+		return sampleConflict{}
 	}
 	if evicted > 0 {
 		i.metrics.cacheEvictions.WithLabelValues("sample_conflicts").Add(float64(evicted))
 	}
-	return false
+	return sampleConflict{}
 }
 
 func (i *Inspector) detectCrossPathCollision(identity RequestIdentity, series uint64) bool {
@@ -310,33 +330,97 @@ func (i *Inspector) detectCrossPathCollision(identity RequestIdentity, series ui
 
 func (i *Inspector) observeBadSeries(identity RequestIdentity, reason string, labels []prompb.Label, series seriesDetails) {
 	i.metrics.badSeries.WithLabelValues(identity.LabelValues(reason)...).Inc()
-	i.metrics.topSeries.Observe(identity, reason, series.name, series.host)
-	i.sampleLog("bad_series", identity, reason, labels, series, 0, 0)
+	i.metrics.topSeries.Observe(identity, reason, labels, series)
+	i.sampleLog("bad_series", identity, reason, labels, series, sampleEvidence{})
 }
 
-func (i *Inspector) observeBadSample(identity RequestIdentity, reason string, labels []prompb.Label, series seriesDetails, ts int64, value float64) {
+func (i *Inspector) observeBadSample(identity RequestIdentity, reason string, labels []prompb.Label, series seriesDetails, evidence sampleEvidence) {
 	i.metrics.badSamples.WithLabelValues(identity.LabelValues(reason)...).Inc()
-	i.metrics.topSeries.Observe(identity, reason, series.name, series.host)
-	i.sampleLog("bad_sample", identity, reason, labels, series, ts, value)
+	i.metrics.topSeries.Observe(identity, reason, labels, series)
+	i.sampleLog("bad_sample", identity, reason, labels, series, evidence)
 }
 
-func (i *Inspector) sampleLog(kind string, identity RequestIdentity, reason string, labels []prompb.Label, series seriesDetails, ts int64, value float64) {
-	if i.cfg.LogSampleRate <= 0 || rand.Float64() > i.cfg.LogSampleRate {
+func (i *Inspector) sampleLog(kind string, identity RequestIdentity, reason string, labels []prompb.Label, series seriesDetails, evidence sampleEvidence) {
+	key := findingLogKey{
+		identityValues: joinIdentityValues(identity.values),
+		kind:           kind,
+		reason:         reason,
+		seriesHash:     series.hash,
+	}
+	if !i.logSampler.ShouldLog(i.clock(), key, i.cfg.LogSampleRate) {
 		return
 	}
+	logLabels, labelsTruncated := boundedLogLabels(labels, i.cfg.LogLabelBytes)
 	attrs := []any{
 		"event", kind,
 		"reason", reason,
 		"series_name", series.name,
 		"host_name", series.host,
-		"series_hash", series.hash,
-		"canonical_labels", canonicalString(labels, 2048),
+		"series_fingerprint", seriesFingerprint(series.hash),
+		"labels", logLabels,
+		"labels_truncated", labelsTruncated,
 	}
 	attrs = append(attrs, identity.Attrs()...)
-	if ts != 0 {
-		attrs = append(attrs, "timestamp", ts, "value_hash", math.Float64bits(value))
+	projectedValues := projectedLabelValues(labels, i.cfg.TopSeriesLabels)
+	for idx, projection := range i.cfg.TopSeriesLabels {
+		attrs = append(attrs, projection.Output, projectedValues[idx])
+	}
+	if evidence.hasTimestamp {
+		attrs = append(attrs, "sample_timestamp_ms", evidence.timestampMs, "sample_type", evidence.sampleType)
+	}
+	if evidence.hasPreviousValue {
+		attrs = append(attrs, "previous_value_bits", "0x"+seriesFingerprint(evidence.previousValueBits))
+		previous := math.Float64frombits(evidence.previousValueBits)
+		if isFinite(previous) {
+			attrs = append(attrs, "previous_value", previous)
+		}
+	}
+	if evidence.hasIncomingValue {
+		attrs = append(attrs, "incoming_value_bits", "0x"+seriesFingerprint(evidence.incomingValueBits))
+		incoming := math.Float64frombits(evidence.incomingValueBits)
+		if isFinite(incoming) {
+			attrs = append(attrs, "incoming_value", incoming)
+		}
+	}
+	if evidence.hasPreviousValue && evidence.hasIncomingValue {
+		previous := math.Float64frombits(evidence.previousValueBits)
+		incoming := math.Float64frombits(evidence.incomingValueBits)
+		delta := incoming - previous
+		if isFinite(previous) && isFinite(incoming) && isFinite(delta) {
+			attrs = append(attrs, "value_delta", delta)
+		}
 	}
 	i.logger.Warn("detected remote-write data quality issue", attrs...)
+}
+
+func sampleValueEvidence(timestampMs int64, value float64) sampleEvidence {
+	return sampleEvidence{
+		hasTimestamp:      true,
+		timestampMs:       timestampMs,
+		sampleType:        "sample",
+		hasIncomingValue:  true,
+		incomingValueBits: math.Float64bits(value),
+	}
+}
+
+func sampleConflictEvidence(timestampMs int64, conflict sampleConflict) sampleEvidence {
+	return sampleEvidence{
+		hasTimestamp:      true,
+		timestampMs:       timestampMs,
+		sampleType:        "sample",
+		hasPreviousValue:  true,
+		previousValueBits: conflict.PreviousValueBits,
+		hasIncomingValue:  true,
+		incomingValueBits: conflict.IncomingValueBits,
+	}
+}
+
+func histogramEvidence(timestampMs int64) sampleEvidence {
+	return sampleEvidence{hasTimestamp: true, timestampMs: timestampMs, sampleType: "histogram"}
+}
+
+func isFinite(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 func (i *Inspector) isDiagnosticMetric(name string) bool {

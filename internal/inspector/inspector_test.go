@@ -2,6 +2,7 @@ package inspector
 
 import (
 	"bytes"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -109,6 +110,158 @@ func TestDuplicateTimestampDifferentValue(t *testing.T) {
 remote_write_inspector_bad_samples_total{reason="duplicate_timestamp_different_value",tenant="tenant-a"} 1
 `), "remote_write_inspector_bad_samples_total"); err != nil {
 		t.Fatalf("bad sample metric mismatch: %v", err)
+	}
+}
+
+func TestTopSeriesSeparatesExactSeriesAndProjectsLabels(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	ins := newTestInspectorWithRegistry(t, reg, Config{
+		IdentityNames: []string{"tenant"},
+		TopSeriesLabels: []TopSeriesLabel{
+			{Source: "service_env", Output: "source_service_env"},
+			{Source: "namespace", Output: "source_namespace"},
+		},
+	})
+	id := identityFor(ins, http.Header{"X-Scope-Orgid": []string{"tenant-test"}})
+	timestamp := time.Now().UnixMilli()
+
+	seriesA := prompb.TimeSeries{
+		Labels: []prompb.Label{
+			{Name: metricNameLabel, Value: "request_duration_seconds_sum"},
+			{Name: "host_name", Value: "collector-test"},
+			{Name: "namespace", Value: "workload-a"},
+			{Name: "service_env", Value: "environment-a"},
+		},
+		Samples: []prompb.Sample{sample(timestamp, 1)},
+	}
+	seriesB := prompb.TimeSeries{
+		Labels: []prompb.Label{
+			{Name: metricNameLabel, Value: "request_duration_seconds_sum"},
+			{Name: "host_name", Value: "collector-test"},
+			{Name: "service_env", Value: "environment-b"},
+		},
+		Samples: []prompb.Sample{sample(timestamp, 1)},
+	}
+
+	ins.Inspect(id, writeRequest(seriesA, seriesB))
+	seriesA.Samples[0].Value = 2
+	seriesB.Samples[0].Value = 3
+	ins.Inspect(id, writeRequest(seriesA, seriesB))
+
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	seenFingerprints := make(map[string]struct{})
+	seenEnvironments := make(map[string]string)
+	for _, family := range families {
+		if family.GetName() != "remote_write_inspector_top_series" {
+			continue
+		}
+		for _, metric := range family.Metric {
+			labels := make(map[string]string, len(metric.Label))
+			for _, label := range metric.Label {
+				labels[label.GetName()] = label.GetValue()
+			}
+			if labels["reason"] != reasonDuplicateTimestampDifferentValue {
+				continue
+			}
+			fingerprint := labels["series_fingerprint"]
+			if len(fingerprint) != 16 {
+				t.Fatalf("fingerprint %q does not have 16 hexadecimal characters", fingerprint)
+			}
+			if _, err := strconv.ParseUint(fingerprint, 16, 64); err != nil {
+				t.Fatalf("fingerprint %q is not hexadecimal: %v", fingerprint, err)
+			}
+			seenFingerprints[fingerprint] = struct{}{}
+			seenEnvironments[labels["source_service_env"]] = labels["source_namespace"]
+		}
+	}
+	if len(seenFingerprints) != 2 {
+		t.Fatalf("distinct fingerprints = %d, want 2", len(seenFingerprints))
+	}
+	if got := seenEnvironments["environment-a"]; got != "workload-a" {
+		t.Fatalf("environment-a namespace = %q, want workload-a", got)
+	}
+	if got := seenEnvironments["environment-b"]; got != unknownIdentity {
+		t.Fatalf("missing namespace = %q, want %q", got, unknownIdentity)
+	}
+}
+
+func TestDuplicateConflictLogContainsBoundedActionableEvidence(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	ins, err := New(Config{
+		IdentityNames:             []string{"tenant"},
+		TopSeriesLabels:           []TopSeriesLabel{{Source: "service_env", Output: "source_service_env"}},
+		LogFirstExamplesPerWindow: 1,
+		LogSampleRate:             0,
+		LogLabelBytes:             4096,
+	}, prometheus.NewRegistry(), logger)
+	if err != nil {
+		t.Fatalf("new inspector: %v", err)
+	}
+	id := identityFor(ins, http.Header{"X-Scope-Orgid": []string{"tenant-test"}})
+	timestamp := time.Now().UnixMilli()
+	series := prompb.TimeSeries{
+		Labels: []prompb.Label{
+			{Name: metricNameLabel, Value: "request_duration_seconds_sum"},
+			{Name: "host_name", Value: "collector-test"},
+			{Name: "service_env", Value: "environment-a"},
+		},
+		Samples: []prompb.Sample{sample(timestamp, 1)},
+	}
+	ins.Inspect(id, writeRequest(series))
+	series.Samples[0].Value = 2
+	ins.Inspect(id, writeRequest(series))
+	series.Samples[0].Value = 3
+	ins.Inspect(id, writeRequest(series))
+
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log lines = %d, want exactly one deterministic first example; output=%s", len(lines), output.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("decode log: %v", err)
+	}
+	if got := record["event"]; got != "bad_sample" {
+		t.Fatalf("event = %#v, want bad_sample", got)
+	}
+	if got := record["reason"]; got != reasonDuplicateTimestampDifferentValue {
+		t.Fatalf("reason = %#v", got)
+	}
+	if got := record["source_service_env"]; got != "environment-a" {
+		t.Fatalf("promoted environment = %#v", got)
+	}
+	if got := record["previous_value"]; got != float64(1) {
+		t.Fatalf("previous value = %#v, want 1", got)
+	}
+	if got := record["incoming_value"]; got != float64(2) {
+		t.Fatalf("incoming value = %#v, want 2", got)
+	}
+	if got := record["value_delta"]; got != float64(1) {
+		t.Fatalf("value delta = %#v, want 1", got)
+	}
+	if got := record["previous_value_bits"]; got != "0x3ff0000000000000" {
+		t.Fatalf("previous bits = %#v", got)
+	}
+	if got := record["incoming_value_bits"]; got != "0x4000000000000000" {
+		t.Fatalf("incoming bits = %#v", got)
+	}
+	fingerprint, ok := record["series_fingerprint"].(string)
+	if !ok || len(fingerprint) != 16 {
+		t.Fatalf("series fingerprint = %#v", record["series_fingerprint"])
+	}
+	loggedLabels, ok := record["labels"].([]any)
+	if !ok || len(loggedLabels) != len(series.Labels) {
+		t.Fatalf("labels = %#v", record["labels"])
+	}
+	for idx, want := range series.Labels {
+		got, ok := loggedLabels[idx].(map[string]any)
+		if !ok || got["name"] != want.Name || got["value"] != want.Value {
+			t.Fatalf("label %d = %#v, want %s=%s", idx, loggedLabels[idx], want.Name, want.Value)
+		}
 	}
 }
 

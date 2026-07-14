@@ -1,8 +1,8 @@
 package inspector
 
 import (
+	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/cespare/xxhash/v2"
 	"github.com/prometheus/prometheus/prompb"
@@ -34,6 +34,10 @@ func canonicalHash(labels []prompb.Label) uint64 {
 	return d.Sum64()
 }
 
+func seriesFingerprint(hash uint64) string {
+	return fmt.Sprintf("%016x", hash)
+}
+
 func labelsInCanonicalOrder(labels []prompb.Label) bool {
 	for idx := 1; idx < len(labels); idx++ {
 		prev := labels[idx-1]
@@ -58,24 +62,6 @@ func hashLabels(labels []prompb.Label) uint64 {
 		_, _ = d.WriteString("\x00")
 	}
 	return d.Sum64()
-}
-
-func canonicalString(labels []prompb.Label, maxBytes int) string {
-	pairs := sortedPairs(labels)
-	var b strings.Builder
-	for idx, pair := range pairs {
-		if idx > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(pair.name)
-		b.WriteByte('=')
-		b.WriteString(pair.value)
-		if maxBytes > 0 && b.Len() >= maxBytes {
-			out := b.String()
-			return out[:maxBytes]
-		}
-	}
-	return b.String()
 }
 
 func sortedPairs(labels []prompb.Label) []labelPair {
