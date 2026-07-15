@@ -57,6 +57,7 @@ func main() {
 
 	flag.StringVar(&cfg.ListenAddress, "listen-address", ":8080", "HTTP listen address.")
 	flag.Int64Var(&cfg.MaxBodyBytes, "max-body-bytes", 32<<20, "Maximum compressed request body size.")
+	flag.IntVar(&cfg.MaxInFlightRequests, "max-in-flight-requests", 8, "Maximum remote-write requests decoded and inspected concurrently; excess requests return 204 and are counted as overloaded.")
 	flag.DurationVar(&cfg.StaleCutoff, "stale-cutoff", 23*time.Hour, "Samples older than now minus this duration are reported as stale.")
 	flag.DurationVar(&cfg.FutureSkew, "future-skew", 10*time.Minute, "Samples newer than now plus this duration are reported as future samples.")
 	flag.IntVar(&cfg.MaxLabels, "max-labels", 128, "Maximum accepted labels per series before reporting excessive_label_count.")

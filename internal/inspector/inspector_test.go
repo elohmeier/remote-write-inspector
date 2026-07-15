@@ -3,11 +3,13 @@ package inspector
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -110,6 +112,29 @@ func TestDuplicateTimestampDifferentValue(t *testing.T) {
 remote_write_inspector_bad_samples_total{reason="duplicate_timestamp_different_value",tenant="tenant-a"} 1
 `), "remote_write_inspector_bad_samples_total"); err != nil {
 		t.Fatalf("bad sample metric mismatch: %v", err)
+	}
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(`
+# HELP remote_write_inspector_cache_operations_total Total stateful detector cache lookups by outcome.
+# TYPE remote_write_inspector_cache_operations_total counter
+remote_write_inspector_cache_operations_total{cache="sample_conflicts",result="hit"} 2
+remote_write_inspector_cache_operations_total{cache="sample_conflicts",result="miss"} 1
+`), "remote_write_inspector_cache_operations_total"); err != nil {
+		t.Fatalf("cache operation metric mismatch: %v", err)
+	}
+}
+
+func TestInactiveStatefulCachesAreNotAllocated(t *testing.T) {
+	ins := newTestInspector(t, Config{DisableDuplicateSampleDetection: true})
+	if ins.samples != nil {
+		t.Fatal("duplicate-sample cache allocated while detector is disabled")
+	}
+	if ins.paths != nil {
+		t.Fatal("cross-path cache allocated without input_path identity")
+	}
+
+	ins = newTestInspector(t, Config{IdentityNames: []string{"input_path"}})
+	if ins.samples == nil || ins.paths == nil {
+		t.Fatal("active stateful detector cache was not allocated")
 	}
 }
 
@@ -468,6 +493,78 @@ remote_write_inspector_requests_total{result="ok"} 1
 	}
 }
 
+func TestReceiveHTTPOverloadReturnsNoContentWithoutReadingBody(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	srv, err := NewServer(Config{
+		ListenAddress:       "127.0.0.1:0",
+		IdentityNames:       []string{"tenant"},
+		MaxInFlightRequests: 1,
+	}, reg, slog.New(slog.NewTextHandler(ioDiscard{}, nil)))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+
+	body := newBlockingBody()
+	first := httptest.NewRequest(http.MethodPost, "/receive", body)
+	first.Header.Set("X-Scope-OrgID", "tenant-a")
+	firstRecorder := httptest.NewRecorder()
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		srv.Handler.ServeHTTP(firstRecorder, first)
+	}()
+	<-body.started
+
+	secondBody := &readTrackingBody{Reader: strings.NewReader("must not be read")}
+	second := httptest.NewRequest(http.MethodPost, "/receive", secondBody)
+	second.Header.Set("X-Scope-OrgID", "tenant-b")
+	secondRecorder := httptest.NewRecorder()
+	srv.Handler.ServeHTTP(secondRecorder, second)
+	if secondRecorder.Code != http.StatusNoContent {
+		t.Fatalf("overloaded status = %d, want %d", secondRecorder.Code, http.StatusNoContent)
+	}
+	if secondBody.read {
+		t.Fatal("overloaded request body was read")
+	}
+
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(`
+# HELP remote_write_inspector_requests_total Total remote-write requests inspected.
+# TYPE remote_write_inspector_requests_total counter
+remote_write_inspector_requests_total{result="overloaded",tenant="tenant-b"} 1
+`), "remote_write_inspector_requests_total"); err != nil {
+		t.Fatalf("overload metric mismatch: %v", err)
+	}
+	if got := gatheredGauge(t, reg, "remote_write_inspector_in_flight_requests"); got != 1 {
+		t.Fatalf("in-flight requests = %v, want 1", got)
+	}
+
+	body.unblock()
+	<-firstDone
+	if got := gatheredGauge(t, reg, "remote_write_inspector_in_flight_requests"); got != 0 {
+		t.Fatalf("in-flight requests after completion = %v, want 0", got)
+	}
+}
+
+func TestServerRegistersRuntimeCollectors(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	if _, err := NewServer(Config{}, reg, slog.New(slog.NewTextHandler(ioDiscard{}, nil))); err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	names := make(map[string]struct{}, len(families))
+	for _, family := range families {
+		names[family.GetName()] = struct{}{}
+	}
+	for _, want := range []string{"go_gc_duration_seconds", "process_cpu_seconds_total"} {
+		if _, ok := names[want]; !ok {
+			t.Fatalf("runtime metric %q is missing", want)
+		}
+	}
+}
+
 func BenchmarkInspectLargeBatch(b *testing.B) {
 	ins := newTestInspectorWithRegistry(b, prometheus.NewRegistry(), Config{
 		IdentityNames: []string{"tenant", "pipeline_sink", "input_path"},
@@ -550,4 +647,57 @@ type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) {
 	return len(p), nil
+}
+
+type blockingBody struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingBody() *blockingBody {
+	return &blockingBody{started: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *blockingBody) Read([]byte) (int, error) {
+	b.once.Do(func() { close(b.started) })
+	<-b.release
+	return 0, io.EOF
+}
+
+func (b *blockingBody) Close() error {
+	return nil
+}
+
+func (b *blockingBody) unblock() {
+	close(b.release)
+}
+
+type readTrackingBody struct {
+	io.Reader
+	read bool
+}
+
+func (b *readTrackingBody) Read(p []byte) (int, error) {
+	b.read = true
+	return b.Reader.Read(p)
+}
+
+func (b *readTrackingBody) Close() error {
+	return nil
+}
+
+func gatheredGauge(t *testing.T, reg *prometheus.Registry, name string) float64 {
+	t.Helper()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	for _, family := range families {
+		if family.GetName() == name && len(family.Metric) == 1 {
+			return family.Metric[0].GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("gauge metric %q is missing or not singular", name)
+	return 0
 }

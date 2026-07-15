@@ -13,8 +13,34 @@ func TestCacheMemoryBudgetOverridesCacheSize(t *testing.T) {
 	if err := cfg.normalize(); err != nil {
 		t.Fatalf("normalize: %v", err)
 	}
+	if cfg.CacheSize != 2000 {
+		t.Fatalf("cache size = %d, want 2000 for one active cache", cfg.CacheSize)
+	}
+}
+
+func TestCacheMemoryBudgetIsSharedByActiveCaches(t *testing.T) {
+	cfg := Config{
+		CacheMemoryBytes: 320000,
+		IdentityNames:    []string{"input_path"},
+	}
+	if err := cfg.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
 	if cfg.CacheSize != 1000 {
-		t.Fatalf("cache size = %d, want 1000", cfg.CacheSize)
+		t.Fatalf("cache size = %d, want 1000 for two active caches", cfg.CacheSize)
+	}
+}
+
+func TestCacheMemoryBudgetWithoutActiveCache(t *testing.T) {
+	cfg := Config{
+		CacheMemoryBytes:                320000,
+		DisableDuplicateSampleDetection: true,
+	}
+	if err := cfg.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if cfg.CacheSize != 0 {
+		t.Fatalf("cache size = %d, want 0 without active caches", cfg.CacheSize)
 	}
 }
 

@@ -14,6 +14,7 @@ type TopSeriesLabel struct {
 type Config struct {
 	ListenAddress             string
 	MaxBodyBytes              int64
+	MaxInFlightRequests       int
 	IdentityNames             []string
 	MaxIdentityLength         int
 	StaleCutoff               time.Duration
@@ -42,6 +43,9 @@ func (c *Config) normalize() error {
 	if c.MaxBodyBytes <= 0 {
 		c.MaxBodyBytes = 32 << 20
 	}
+	if c.MaxInFlightRequests <= 0 {
+		c.MaxInFlightRequests = 8
+	}
 	if c.MaxIdentityLength <= 0 {
 		c.MaxIdentityLength = 128
 	}
@@ -58,7 +62,7 @@ func (c *Config) normalize() error {
 		c.MaxLabelValueLength = 4096
 	}
 	if c.CacheMemoryBytes > 0 {
-		c.CacheSize = cacheSizeFromMemoryBudget(c.CacheMemoryBytes)
+		c.CacheSize = cacheSizeFromMemoryBudget(c.CacheMemoryBytes, c.activeStatefulDetectors())
 	} else if c.CacheSize <= 0 {
 		c.CacheSize = 500000
 	}
@@ -156,12 +160,34 @@ func (c *Config) normalizeTopSeriesLabels() error {
 	return nil
 }
 
-func cacheSizeFromMemoryBudget(bytes int64) int {
+func (c Config) activeStatefulDetectors() int {
+	active := 0
+	if !c.DisableDuplicateSampleDetection {
+		active++
+	}
+	if !c.DisableCrossPathCollisionDetection && containsString(c.IdentityNames, "input_path") {
+		active++
+	}
+	return active
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func cacheSizeFromMemoryBudget(bytes int64, activeCaches int) int {
 	const (
-		statefulCaches         = 2
 		estimatedBytesPerEntry = 160
 	)
-	entries := bytes / (statefulCaches * estimatedBytesPerEntry)
+	if activeCaches <= 0 {
+		return 0
+	}
+	entries := bytes / (int64(activeCaches) * estimatedBytesPerEntry)
 	if entries < 1 {
 		return 1
 	}

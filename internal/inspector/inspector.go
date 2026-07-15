@@ -44,6 +44,7 @@ type Inspector struct {
 	logSampler *findingLogSampler
 	samples    *stateCache[sampleKey, sampleValue]
 	paths      *stateCache[pathKey, string]
+	admission  chan struct{}
 
 	cacheMetricsMtx  sync.Mutex
 	cacheMetricsLast time.Time
@@ -104,14 +105,17 @@ func New(cfg Config, reg prometheus.Registerer, logger *slog.Logger) (*Inspector
 	if err != nil {
 		return nil, err
 	}
-	sampleCacheSize := cfg.CacheSize
-	if cfg.DisableDuplicateSampleDetection {
-		sampleCacheSize = 1
+	var samples *stateCache[sampleKey, sampleValue]
+	if !cfg.DisableDuplicateSampleDetection {
+		samples = newStateCache[sampleKey, sampleValue](cfg.CacheSize, cfg.CacheTTL, clock, sampleCacheShard)
+		m.cacheCapacity.WithLabelValues("sample_conflicts").Set(float64(samples.Capacity()))
 	}
-	pathCacheSize := cfg.CacheSize
-	if cfg.DisableCrossPathCollisionDetection {
-		pathCacheSize = 1
+	var paths *stateCache[pathKey, string]
+	if !cfg.DisableCrossPathCollisionDetection && ids.Has("input_path") {
+		paths = newStateCache[pathKey, string](cfg.CacheSize, cfg.CacheTTL, clock, pathCacheShard)
+		m.cacheCapacity.WithLabelValues("cross_path").Set(float64(paths.Capacity()))
 	}
+	m.maxInFlight.Set(float64(cfg.MaxInFlightRequests))
 	return &Inspector{
 		cfg:        cfg,
 		ids:        ids,
@@ -119,9 +123,25 @@ func New(cfg Config, reg prometheus.Registerer, logger *slog.Logger) (*Inspector
 		logger:     logger.With("component", "remote-write-inspector"),
 		clock:      clock,
 		logSampler: newFindingLogSampler(cfg.TopSeriesWindow, cfg.LogFirstExamplesPerWindow, clock()),
-		samples:    newStateCache[sampleKey, sampleValue](sampleCacheSize, cfg.CacheTTL, clock, sampleCacheShard),
-		paths:      newStateCache[pathKey, string](pathCacheSize, cfg.CacheTTL, clock, pathCacheShard),
+		samples:    samples,
+		paths:      paths,
+		admission:  make(chan struct{}, cfg.MaxInFlightRequests),
 	}, nil
+}
+
+func (i *Inspector) tryAdmit() bool {
+	select {
+	case i.admission <- struct{}{}:
+		i.metrics.inFlightRequests.Inc()
+		return true
+	default:
+		return false
+	}
+}
+
+func (i *Inspector) release() {
+	<-i.admission
+	i.metrics.inFlightRequests.Dec()
 }
 
 func (i *Inspector) IdentityFromHeaders(h http.Header) RequestIdentity {
@@ -300,11 +320,13 @@ func (i *Inspector) detectDuplicateSample(identity RequestIdentity, series uint6
 
 	existing, ok, evicted := i.samples.GetOrPut(key, sampleValue{valueBits: valueBits})
 	if ok {
+		i.metrics.cacheOperations.WithLabelValues("sample_conflicts", "hit").Inc()
 		if existing.valueBits != valueBits {
 			return sampleConflict{Found: true, PreviousValueBits: existing.valueBits, IncomingValueBits: valueBits}
 		}
 		return sampleConflict{}
 	}
+	i.metrics.cacheOperations.WithLabelValues("sample_conflicts", "miss").Inc()
 	if evicted > 0 {
 		i.metrics.cacheEvictions.WithLabelValues("sample_conflicts").Add(float64(evicted))
 	}
@@ -320,8 +342,10 @@ func (i *Inspector) detectCrossPathCollision(identity RequestIdentity, series ui
 
 	existing, ok, evicted := i.paths.GetOrPut(key, inputPath)
 	if ok {
+		i.metrics.cacheOperations.WithLabelValues("cross_path", "hit").Inc()
 		return existing != inputPath
 	}
+	i.metrics.cacheOperations.WithLabelValues("cross_path", "miss").Inc()
 	if evicted > 0 {
 		i.metrics.cacheEvictions.WithLabelValues("cross_path").Add(float64(evicted))
 	}
@@ -442,8 +466,12 @@ func (i *Inspector) updateCacheMetrics() {
 	i.cacheMetricsLast = now
 	i.cacheMetricsMtx.Unlock()
 
-	i.metrics.cacheEntries.WithLabelValues("sample_conflicts").Set(float64(i.samples.Len()))
-	i.metrics.cacheEntries.WithLabelValues("cross_path").Set(float64(i.paths.Len()))
+	if i.samples != nil {
+		i.metrics.cacheEntries.WithLabelValues("sample_conflicts").Set(float64(i.samples.Len()))
+	}
+	if i.paths != nil {
+		i.metrics.cacheEntries.WithLabelValues("cross_path").Set(float64(i.paths.Len()))
+	}
 }
 
 func sampleCacheShard(key sampleKey) uint64 {

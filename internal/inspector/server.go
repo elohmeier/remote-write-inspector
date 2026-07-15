@@ -11,6 +11,7 @@ import (
 	"github.com/gogo/protobuf/proto"
 	"github.com/golang/snappy"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/prometheus/prompb"
 )
@@ -18,6 +19,14 @@ import (
 func NewServer(cfg Config, reg *prometheus.Registry, logger *slog.Logger) (*http.Server, error) {
 	if reg == nil {
 		reg = prometheus.NewRegistry()
+	}
+	for _, collector := range []prometheus.Collector{
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
+	} {
+		if err := reg.Register(collector); err != nil {
+			return nil, fmt.Errorf("register runtime collector: %w", err)
+		}
 	}
 	inspector, err := New(cfg, reg, logger)
 	if err != nil {
@@ -50,6 +59,19 @@ func (i *Inspector) receiveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	identity := i.IdentityFromHeaders(r.Header)
+	if !i.tryAdmit() {
+		i.metrics.requests.WithLabelValues(identity.LabelValues("overloaded")...).Inc()
+		w.Header().Set("Connection", "close")
+		_ = r.Body.Close()
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	requestStart := i.clock()
+	defer func() {
+		i.metrics.requestDuration.Observe(i.clock().Sub(requestStart).Seconds())
+		i.release()
+	}()
+
 	body, err := readLimited(r.Body, i.cfg.MaxBodyBytes)
 	if err != nil {
 		i.ObserveRequest(identity, "too_large", len(body))
@@ -58,9 +80,15 @@ func (i *Inspector) receiveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	decodeStart := i.clock()
-	defer func() {
+	decodeObserved := false
+	observeDecode := func() {
+		if decodeObserved {
+			return
+		}
+		decodeObserved = true
 		i.metrics.decodeDuration.Observe(i.clock().Sub(decodeStart).Seconds())
-	}()
+	}
+	defer observeDecode()
 	decodedLen, err := snappy.DecodedLen(body)
 	if err != nil {
 		i.ObserveDecodeError("snappy")
@@ -88,6 +116,7 @@ func (i *Inspector) receiveHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	observeDecode()
 
 	result := i.Inspect(identity, &req)
 	requestResult := "ok"

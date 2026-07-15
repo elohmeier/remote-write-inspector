@@ -16,8 +16,13 @@ type metrics struct {
 	badSamples         *prometheus.CounterVec
 	decodeErrors       *prometheus.CounterVec
 	cacheEntries       *prometheus.GaugeVec
+	cacheCapacity      *prometheus.GaugeVec
 	cacheEvictions     *prometheus.CounterVec
+	cacheOperations    *prometheus.CounterVec
+	inFlightRequests   prometheus.Gauge
+	maxInFlight        prometheus.Gauge
 	requestBytes       prometheus.Histogram
+	requestDuration    prometheus.Histogram
 	decodeDuration     prometheus.Histogram
 	validationDuration prometheus.Histogram
 	topSeries          *topSeriesCollector
@@ -49,14 +54,35 @@ func newMetrics(reg prometheus.Registerer, identityLabels []string, topSeriesSiz
 			Name: "remote_write_inspector_cache_entries",
 			Help: "Current entries in stateful detector caches.",
 		}, []string{"cache"}),
+		cacheCapacity: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "remote_write_inspector_cache_capacity_entries",
+			Help: "Configured entry capacity of active stateful detector caches.",
+		}, []string{"cache"}),
 		cacheEvictions: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "remote_write_inspector_cache_evictions_total",
 			Help: "Total stateful detector cache evictions.",
 		}, []string{"cache"}),
+		cacheOperations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "remote_write_inspector_cache_operations_total",
+			Help: "Total stateful detector cache lookups by outcome.",
+		}, []string{"cache", "result"}),
+		inFlightRequests: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "remote_write_inspector_in_flight_requests",
+			Help: "Current admitted remote-write requests being processed.",
+		}),
+		maxInFlight: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "remote_write_inspector_max_in_flight_requests",
+			Help: "Configured maximum admitted remote-write requests.",
+		}),
 		requestBytes: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "remote_write_inspector_request_bytes",
 			Help:    "Compressed remote-write request body size in bytes.",
 			Buckets: prometheus.ExponentialBuckets(1024, 2, 16),
+		}),
+		requestDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "remote_write_inspector_request_duration_seconds",
+			Help:    "End-to-end duration of admitted remote-write requests.",
+			Buckets: prometheus.DefBuckets,
 		}),
 		decodeDuration: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Name:    "remote_write_inspector_decode_duration_seconds",
@@ -78,8 +104,13 @@ func newMetrics(reg prometheus.Registerer, identityLabels []string, topSeriesSiz
 		m.badSamples,
 		m.decodeErrors,
 		m.cacheEntries,
+		m.cacheCapacity,
 		m.cacheEvictions,
+		m.cacheOperations,
+		m.inFlightRequests,
+		m.maxInFlight,
 		m.requestBytes,
+		m.requestDuration,
 		m.decodeDuration,
 		m.validationDuration,
 		m.topSeries,

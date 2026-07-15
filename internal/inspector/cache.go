@@ -10,6 +10,7 @@ const defaultCacheShards = 64
 type stateCache[K comparable, V any] struct {
 	shards []stateCacheShard[K, V]
 	shard  func(K) uint64
+	size   int
 }
 
 type stateCacheShard[K comparable, V any] struct {
@@ -47,6 +48,7 @@ func newStateCache[K comparable, V any](maxEntries int, ttl time.Duration, clock
 	c := &stateCache[K, V]{
 		shards: make([]stateCacheShard[K, V], shardCount),
 		shard:  shard,
+		size:   maxEntries,
 	}
 	baseSize := maxEntries / shardCount
 	extra := maxEntries % shardCount
@@ -58,6 +60,10 @@ func newStateCache[K comparable, V any](maxEntries int, ttl time.Duration, clock
 		c.shards[idx].cache = newCircularCache[K, V](size, ttl, clock)
 	}
 	return c
+}
+
+func (c *stateCache[K, V]) Capacity() int {
+	return c.size
 }
 
 func (c *stateCache[K, V]) GetOrPut(key K, value V) (V, bool, int) {

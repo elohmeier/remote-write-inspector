@@ -74,6 +74,20 @@ func (s *IdentitySet) LabelNames() []string {
 	return append([]string(nil), s.names...)
 }
 
+func (s *IdentitySet) Has(name string) bool {
+	_, ok := s.byName(name)
+	return ok
+}
+
+func (s *IdentitySet) byName(name string) (IdentityDefinition, bool) {
+	for _, def := range s.defs {
+		if def.Name == name {
+			return def, true
+		}
+	}
+	return IdentityDefinition{}, false
+}
+
 func (s *IdentitySet) Resolve(h http.Header) RequestIdentity {
 	values := make([]string, 0, len(s.defs))
 	byName := make(map[string]string, len(s.defs))

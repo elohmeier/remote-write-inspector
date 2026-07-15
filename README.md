@@ -13,6 +13,11 @@ exports bounded diagnostics, emits sampled structured logs, and returns `204 No
 Content` for successfully decoded requests so it can be used without turning bad
 data into ingestion backpressure.
 
+The receiver is intentionally best-effort. `--max-in-flight-requests` bounds
+concurrent body allocation, decoding, and inspection. Excess requests are
+counted with `result="overloaded"` and acknowledged with `204 No Content` so a
+diagnostic outage cannot backpressure the primary metrics path.
+
 ## Usage
 
 ```bash
@@ -163,7 +168,12 @@ rate(remote_write_inspector_requests_total[1m])
 rate(remote_write_inspector_samples_total[1m])
 histogram_quantile(0.99, rate(remote_write_inspector_decode_duration_seconds_bucket[1m]))
 histogram_quantile(0.99, rate(remote_write_inspector_validation_duration_seconds_bucket[1m]))
+histogram_quantile(0.99, rate(remote_write_inspector_request_duration_seconds_bucket[1m]))
+remote_write_inspector_in_flight_requests
+remote_write_inspector_max_in_flight_requests
 remote_write_inspector_cache_entries
+remote_write_inspector_cache_capacity_entries
+rate(remote_write_inspector_cache_operations_total[1m])
 rate(remote_write_inspector_cache_evictions_total[1m])
 rate(remote_write_inspector_decode_errors_total[1m])
 ```
@@ -183,8 +193,10 @@ Or by an approximate total memory budget for both stateful caches:
 go run ./cmd/remote-write-inspector --cache-memory-bytes=8589934592
 ```
 
-`--cache-memory-bytes` overrides `--cache-size` and uses a conservative entry
-estimate. Exact duplicate-timestamp detection still scales with the number of
+`--cache-memory-bytes` overrides `--cache-size`, uses a conservative entry
+estimate, and divides the total budget only among active stateful detectors.
+The cross-path detector allocates no cache unless `input_path` identity is
+enabled. Exact duplicate-timestamp detection still scales with the number of
 samples retained inside `--cache-ttl`; at very high ingress rates, a long TTL
 can require impractical memory.
 
