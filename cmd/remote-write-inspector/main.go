@@ -53,6 +53,7 @@ func main() {
 	var identities identityFlags
 	var topSeriesLabels topSeriesLabelFlags
 	var cfg inspector.Config
+	capture := inspector.DefaultCaptureConfig()
 	var showVersion bool
 
 	flag.StringVar(&cfg.ListenAddress, "listen-address", ":8080", "HTTP listen address.")
@@ -75,6 +76,11 @@ func main() {
 	flag.BoolVar(&cfg.DisableDuplicateSampleDetection, "disable-duplicate-sample-detection", false, "Disable duplicate timestamp with different value detection.")
 	flag.BoolVar(&cfg.DisableCrossPathCollisionDetection, "disable-cross-path-collision-detection", false, "Disable cross-input-path canonical labelset collision detection.")
 	flag.Var(&identities, "identity", "Enable an identity shorthand. Repeatable. Supported: tenant, pipeline_sink, input_path, writer_id.")
+	flag.StringVar(&capture.Selector, "capture-selector", "", "Opt in to bounded float-sample logs matching this Prometheus series selector, including valid samples.")
+	flag.DurationVar(&capture.Duration, "capture-duration", capture.Duration, "Capture duration from process startup; must be positive.")
+	flag.IntVar(&capture.MaxSamples, "capture-max-samples", capture.MaxSamples, "Maximum capture log attempts per process; must be positive.")
+	flag.IntVar(&capture.Rate, "capture-rate", capture.Rate, "Maximum capture log attempts per one-second window per process; must be positive.")
+	flag.IntVar(&capture.LabelBytes, "capture-label-bytes", capture.LabelBytes, "Maximum encoded label-array bytes per capture record; must be at least 2.")
 	flag.BoolVar(&showVersion, "version", false, "Print version information and exit.")
 	flag.Parse()
 
@@ -84,6 +90,9 @@ func main() {
 	}
 
 	cfg.IdentityNames = identities
+	if capture.Selector != "" {
+		cfg.Capture = &capture
+	}
 	cfg.TopSeriesLabels = topSeriesLabels
 	cfg.DiagnosticMetricPrefixes = []string{"remote_write_inspector_", "obspipeline_"}
 

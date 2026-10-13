@@ -12,6 +12,8 @@ type TopSeriesLabel struct {
 }
 
 type Config struct {
+	// Capture is nil unless sample capture is explicitly enabled.
+	Capture                   *CaptureConfig
 	ListenAddress             string
 	MaxBodyBytes              int64
 	MaxInFlightRequests       int

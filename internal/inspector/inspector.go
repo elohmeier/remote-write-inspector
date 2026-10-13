@@ -42,6 +42,7 @@ type Inspector struct {
 	logger     *slog.Logger
 	clock      func() time.Time
 	logSampler *findingLogSampler
+	capture    *sampleCapture
 	samples    *stateCache[sampleKey, sampleValue]
 	paths      *stateCache[pathKey, string]
 	admission  chan struct{}
@@ -116,7 +117,7 @@ func New(cfg Config, reg prometheus.Registerer, logger *slog.Logger) (*Inspector
 		m.cacheCapacity.WithLabelValues("cross_path").Set(float64(paths.Capacity()))
 	}
 	m.maxInFlight.Set(float64(cfg.MaxInFlightRequests))
-	return &Inspector{
+	ins := &Inspector{
 		cfg:        cfg,
 		ids:        ids,
 		metrics:    m,
@@ -126,7 +127,14 @@ func New(cfg Config, reg prometheus.Registerer, logger *slog.Logger) (*Inspector
 		samples:    samples,
 		paths:      paths,
 		admission:  make(chan struct{}, cfg.MaxInFlightRequests),
-	}, nil
+	}
+	if cfg.Capture != nil {
+		ins.capture, err = newSampleCapture(*cfg.Capture, reg, ids.LabelNames(), ins.logger, func() time.Time { return ins.clock() })
+		if err != nil {
+			return nil, err
+		}
+	}
+	return ins, nil
 }
 
 func (i *Inspector) tryAdmit() bool {
@@ -158,6 +166,10 @@ func (i *Inspector) ObserveRequest(identity RequestIdentity, result string, body
 }
 
 func (i *Inspector) Inspect(identity RequestIdentity, req *prompb.WriteRequest) InspectionResult {
+	return i.inspectReceived(identity, req, i.clock())
+}
+
+func (i *Inspector) inspectReceived(identity RequestIdentity, req *prompb.WriteRequest, receivedAt time.Time) InspectionResult {
 	start := i.clock()
 	defer func() {
 		i.metrics.validationDuration.Observe(i.clock().Sub(start).Seconds())
@@ -173,6 +185,9 @@ func (i *Inspector) Inspect(identity RequestIdentity, req *prompb.WriteRequest) 
 			name: seriesName(ts.Labels),
 			host: hostName(ts.Labels),
 			hash: canonicalHash(ts.Labels),
+		}
+		if i.capture != nil {
+			i.capture.inspect(identity, &ts, series, receivedAt)
 		}
 		seriesReasons := i.validateSeries(ts.Labels)
 		for reason := range seriesReasons {

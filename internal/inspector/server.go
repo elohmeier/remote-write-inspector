@@ -58,6 +58,7 @@ func (i *Inspector) receiveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	receivedAt := i.clock()
 	identity := i.IdentityFromHeaders(r.Header)
 	if !i.tryAdmit() {
 		i.metrics.requests.WithLabelValues(identity.LabelValues("overloaded")...).Inc()
@@ -118,7 +119,7 @@ func (i *Inspector) receiveHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	observeDecode()
 
-	result := i.Inspect(identity, &req)
+	result := i.inspectReceived(identity, &req, receivedAt)
 	requestResult := "ok"
 	if result.BadData {
 		requestResult = "bad_data"

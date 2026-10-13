@@ -114,6 +114,92 @@ zero to disable finding examples completely. Source labels and sample values
 are application-controlled and may be sensitive, so protect log access and
 retention accordingly.
 
+## Bounded Sample Capture
+
+Use `--capture-selector` to capture selected float samples, including valid
+samples that produce no findings. Capture is off by default and operates
+independently of finding-log sampling:
+
+```bash
+go run ./cmd/remote-write-inspector \
+  --identity=tenant \
+  --identity=input_path \
+  --capture-selector='{__name__=~"recorded:.*",monitor_source="user-workload/thanos-ruler"}' \
+  --capture-duration=5m \
+  --capture-max-samples=1000 \
+  --capture-rate=10 \
+  --capture-label-bytes=4096
+```
+
+The selector uses Prometheus metric-selector syntax (metric name and/or label
+matchers, not a PromQL expression). It matches source-series labels, not HTTP
+identity headers. At least one matcher must exclude an empty/missing value.
+Missing labels have the usual empty-string matching semantics. For invalid
+duplicate label names, every occurrence must satisfy that label's matchers.
+
+| Flag | Default | Scope |
+| --- | --- | --- |
+| `--capture-selector` | empty (disabled) | One selector per process |
+| `--capture-duration` | `5m` | Deadline from inspector startup |
+| `--capture-max-samples` | `1000` | Total log attempts per process |
+| `--capture-rate` | `10` | Log attempts per one-second window per process |
+| `--capture-label-bytes` | `4096` | Encoded JSON label-array bytes per record |
+
+Duration, sample count, and rate must be positive; label bytes must be at least
+2. The other capture flags have no effect without a selector. Budgets are
+shared across identities and concurrent requests. The rate limit uses fixed
+one-second windows starting at startup or the first attempt after a window
+expires; it allows bursts within a window. There is no queue or retry for
+skipped samples. Restarting the process starts a new session with new budgets.
+
+Each structured log has `event="sample_capture"` and includes:
+
+- `received_at`: UTC time when the HTTP handler received the request, before
+  reading or decoding its body. This is the inspector's arrival time, not the
+  sender's dispatch time or the destination receiver's arrival time.
+- `sample_timestamp_ms`, `sample_type="float"`, and `sample_value_bits`: the
+  original timestamp and exact IEEE-754 bits in hexadecimal. `sample_value`
+  is also included for finite values. The bits preserve NaN payloads (including
+  stale markers), infinities, and signed zero.
+- `labels`: the original ordered label array, preserving duplicates and replica
+  labels, up to the byte limit. `labels_count` is the original label count;
+  `labels_truncated` marks omitted labels. The first label that would exceed
+  the limit and all following labels are omitted.
+- `series_fingerprint`: the canonical fingerprint of the complete label set,
+  even when the logged array is truncated. Retain complete labels when checking
+  series equality; a fingerprint alone is not proof.
+- Configured request identities, such as `tenant` and `input_path`.
+
+Capture metrics are registered only when enabled. Counters use configured
+identity labels; sample counters also use `sample_type` (`float` or `histogram`):
+
+| Metric | Meaning |
+| --- | --- |
+| `remote_write_inspector_capture_matched_samples_total` | Decoded samples matching the selector, including after capture limits are reached |
+| `remote_write_inspector_capture_captured_samples_total` | Samples successfully handed to the log handler |
+| `remote_write_inspector_capture_skipped_samples_total` | Matching samples skipped, with a `reason` label |
+| `remote_write_inspector_capture_truncated_samples_total` | Subset of captured samples with truncated labels; identity labels only |
+| `remote_write_inspector_capture_deadline_timestamp_seconds` | Session deadline as Unix time; no labels |
+
+Skip reasons are `duration_limit`, `sample_limit`, `rate_limit`, `log_disabled`,
+`log_error`, and `unsupported_sample_type`. Failed or disabled log writes
+consume an attempt from the count and rate budgets. Native histogram samples
+are counted as matched and skipped with `unsupported_sample_type`; exemplars
+and metadata are not captured or included in these sample counters.
+
+For completed inspections, matched samples equal captured plus skipped samples
+per identity and sample type. Truncated samples are a subset of captured
+samples. A scrape during an active inspection can observe a temporary gap.
+Capture does not change validation findings or HTTP response semantics.
+
+This is bounded evidence from traffic that reaches the inspector and is
+decoded. Overloaded, oversized, or undecodable requests have unknown matching
+sample counts: consult `remote_write_inspector_requests_total` as well as the
+capture counters. A `204` can acknowledge an uninspected overload request.
+Mirror drops and downstream ingestion outcomes require separate evidence.
+Successful logging does not acknowledge durable log storage; retain the logs
+and metrics together when using a capture for an investigation.
+
 ## Load Testing
 
 The repo includes a synthetic remote-write load generator that sends real
