@@ -391,7 +391,7 @@ func (i *Inspector) sampleLog(kind string, identity RequestIdentity, reason stri
 	}
 	logLabels, labelsTruncated := boundedLogLabels(labels, i.cfg.LogLabelBytes)
 	attrs := []any{
-		"event", kind,
+		slog.Group("event", "action", kind),
 		"reason", reason,
 		"series_name", series.name,
 		"host_name", series.host,

@@ -106,6 +106,14 @@ labels for invalid-series investigations. Duplicate-timestamp conflicts also
 include the previous and incoming IEEE-754 bit patterns, finite numeric values,
 and their delta.
 
+The event discriminator is a JSON object: `{"event":{"action":"bad_series"}}`
+or `{"event":{"action":"bad_sample"}}`. Capture logs use the same shape with
+`action="sample_capture"`. Consumers of earlier versions must migrate from the
+scalar `event` field to `event.action`. Keeping `event` as an object allows
+collectors to add fields such as `event.created` and avoids conflicts with ECS
+Elasticsearch mappings. The remaining diagnostic fields retain their existing
+format; this is not a complete ECS log envelope.
+
 The first distinct findings in each `--top-series-window` are logged
 deterministically. `--log-first-examples-per-window` bounds those logs; after a
 finding's first example, `--log-sample-rate` controls repeat examples.
@@ -152,7 +160,7 @@ one-second windows starting at startup or the first attempt after a window
 expires; it allows bursts within a window. There is no queue or retry for
 skipped samples. Restarting the process starts a new session with new budgets.
 
-Each structured log has `event="sample_capture"` and includes:
+Each structured log has `event.action="sample_capture"` and includes:
 
 - `received_at`: UTC time when the HTTP handler received the request, before
   reading or decoding its body. This is the inspector's arrival time, not the

@@ -152,7 +152,7 @@ func (c *sampleCapture) inspect(identity RequestIdentity, ts *prompb.TimeSeries,
 		ls, truncated := boundedLogLabels(ts.Labels, c.cfg.LabelBytes)
 		record := slog.NewRecord(now, slog.LevelInfo, "captured remote-write sample", 0)
 		record.Add(
-			"event", "sample_capture",
+			slog.Group("event", "action", "sample_capture"),
 			"series_fingerprint", seriesFingerprint(series.hash),
 			"received_at", receivedAt.UTC().Format(time.RFC3339Nano),
 			"sample_type", "float",

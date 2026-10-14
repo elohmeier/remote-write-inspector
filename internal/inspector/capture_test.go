@@ -69,7 +69,13 @@ func captureRecords(t *testing.T, buf *bytes.Buffer) []map[string]json.RawMessag
 			}
 			t.Fatal(err)
 		}
-		if string(record["event"]) == `"sample_capture"` {
+		var event struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(record["event"], &event); err != nil {
+			t.Fatalf("event must be an object: %v", err)
+		}
+		if event.Action == "sample_capture" {
 			records = append(records, record)
 		}
 	}
@@ -135,7 +141,7 @@ func TestCapturePreservesEvidence(t *testing.T) {
 			t.Fatalf("labels changed: %v", ls)
 		}
 		for field, want := range map[string]string{
-			"event": `"sample_capture"`, "sample_type": `"float"`, "tenant": `"test"`, "input_path": `"ruler"`,
+			"event": `{"action":"sample_capture"}`, "sample_type": `"float"`, "tenant": `"test"`, "input_path": `"ruler"`,
 			"component": `"remote-write-inspector"`, "labels_truncated": "false", "labels_count": "5",
 			"sample_timestamp_ms": "1791892800123", "sample_value_bits": fmt.Sprintf(`"0x%016x"`, math.Float64bits(values[idx])),
 			"received_at":        fmt.Sprintf("%q", received.UTC().Format(time.RFC3339Nano)),

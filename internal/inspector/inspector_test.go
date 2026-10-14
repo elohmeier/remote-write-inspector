@@ -213,6 +213,28 @@ func TestTopSeriesSeparatesExactSeriesAndProjectsLabels(t *testing.T) {
 	}
 }
 
+func TestBadSeriesLogEventAction(t *testing.T) {
+	var output bytes.Buffer
+	ins, err := New(Config{LogFirstExamplesPerWindow: 1}, prometheus.NewRegistry(), slog.New(slog.NewJSONHandler(&output, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ins.Inspect(ins.IdentityFromHeaders(nil), writeRequest(prompb.TimeSeries{
+		Labels:  []prompb.Label{{Name: metricNameLabel, Value: "invalid metric"}},
+		Samples: []prompb.Sample{sample(time.Now().UnixMilli(), 1)},
+	}))
+	var record map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &record); err != nil {
+		t.Fatalf("decode finding: %v; output=%s", err, output.String())
+	}
+	if event, ok := record["event"].(map[string]any); !ok || event["action"] != "bad_series" {
+		t.Fatalf("event = %#v, want object with action bad_series", record["event"])
+	}
+	if record["reason"] != reasonInvalidMetricName {
+		t.Fatalf("reason = %#v", record["reason"])
+	}
+}
+
 func TestDuplicateConflictLogContainsBoundedActionableEvidence(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
@@ -250,8 +272,8 @@ func TestDuplicateConflictLogContainsBoundedActionableEvidence(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
 		t.Fatalf("decode log: %v", err)
 	}
-	if got := record["event"]; got != "bad_sample" {
-		t.Fatalf("event = %#v, want bad_sample", got)
+	if event, ok := record["event"].(map[string]any); !ok || event["action"] != "bad_sample" {
+		t.Fatalf("event = %#v, want object with action bad_sample", record["event"])
 	}
 	if got := record["reason"]; got != reasonDuplicateTimestampDifferentValue {
 		t.Fatalf("reason = %#v", got)
